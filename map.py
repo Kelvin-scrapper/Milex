@@ -1,9 +1,18 @@
 import pandas as pd
+import numpy as np
 import os
+from datetime import datetime
 
-# Hardcoded column headers - exact order from MILEX_DATA_20250429 (country columns only)
+SHEET_NAME = "DATA"
+YEAR_COL = "Year"
+SIPRI_SHEET = "Current US$"       # sheet name in SIPRI source file
+OUTPUT_DIR = "output"             # all output files go here
+# ISO codes for dissolved/historical states — expected to have no recent data
+HISTORICAL_CODES = frozenset({'YMD', 'YUSL', 'USSR', 'GDR', 'CZSL'})
+
+# Country columns in the fixed output order (ISO code + descriptor)
 HARDCODED_COUNTRY_COLUMNS = [
-    'DZA.MILEX.A', 'LBY.MILEX.A', 'MAR.MILEX.A', 'TUN.MILEX.A', 'AGO.MILEX.A', 'BEN.MILEX.A', 
+    'DZA.MILEX.A', 'LBY.MILEX.A', 'MAR.MILEX.A', 'TUN.MILEX.A', 'AGO.MILEX.A', 'BEN.MILEX.A',
     'BWA.MILEX.A', 'BFA.MILEX.A', 'BDI.MILEX.A', 'CMR.MILEX.A', 'CPV.MILEX.A', 'CAF.MILEX.A',
     'TCD.MILEX.A', 'COD.MILEX.A', 'COG.MILEX.A', 'CIV.MILEX.A', 'DJI.MILEX.A', 'GNQ.MILEX.A',
     'ERI.MILEX.A', 'ETH.MILEX.A', 'GAB.MILEX.A', 'GMB.MILEX.A', 'GHA.MILEX.A', 'GIN.MILEX.A',
@@ -34,13 +43,13 @@ HARDCODED_COUNTRY_COLUMNS = [
     'SYR.MILEX.A', 'TUR.MILEX.A', 'ARE.MILEX.A', 'YMD.MILEX.A', 'YEM.MILEX.A'
 ]
 
-# Country code mapping (ISO 3-letter codes to country names) - for flexible matching
+# ISO 3-letter code -> canonical country name
 COUNTRY_CODE_MAP = {
     'DZA': 'Algeria', 'LBY': 'Libya', 'MAR': 'Morocco', 'TUN': 'Tunisia',
     'AGO': 'Angola', 'BEN': 'Benin', 'BWA': 'Botswana', 'BFA': 'Burkina Faso',
     'BDI': 'Burundi', 'CMR': 'Cameroon', 'CPV': 'Cape Verde', 'CAF': 'Central African Republic',
     'TCD': 'Chad', 'COD': 'Democratic Republic of the Congo', 'COG': 'Republic of the Congo',
-    'CIV': 'Côte d\'Ivoire', 'DJI': 'Djibouti', 'GNQ': 'Equatorial Guinea',
+    'CIV': "Côte d'Ivoire", 'DJI': 'Djibouti', 'GNQ': 'Equatorial Guinea',
     'ERI': 'Eritrea', 'ETH': 'Ethiopia', 'GAB': 'Gabon', 'GMB': 'Gambia',
     'GHA': 'Ghana', 'GIN': 'Guinea', 'GNB': 'Guinea-Bissau', 'KEN': 'Kenya',
     'LSO': 'Lesotho', 'LBR': 'Liberia', 'MDG': 'Madagascar', 'MWI': 'Malawi',
@@ -66,569 +75,452 @@ COUNTRY_CODE_MAP = {
     'KAZ': 'Kazakhstan', 'KGZ': 'Kyrgyzstan', 'TJK': 'Tajikistan',
     'TKM': 'Turkmenistan', 'UZB': 'Uzbekistan', 'ALB': 'Albania',
     'BIH': 'Bosnia and Herzegovina', 'BGR': 'Bulgaria', 'HRV': 'Croatia',
-    'CZE': 'Czech Republic', 'CZSL': 'Czechoslovakia', 'EST': 'Estonia', 'GDR': 'East Germany', 
-    'HUN': 'Hungary', 'XKX': 'Kosovo', 'LVA': 'Latvia', 'LTU': 'Lithuania', 
-    'MKD': 'North Macedonia', 'MNE': 'Montenegro', 'POL': 'Poland', 'ROU': 'Romania', 
-    'SRB': 'Serbia', 'SVK': 'Slovakia', 'SVN': 'Slovenia', 'YUSL': 'Yugoslavia',
-    'ARM': 'Armenia', 'AZE': 'Azerbaijan', 'BLR': 'Belarus', 'GEO': 'Georgia', 
-    'MDA': 'Moldova', 'RUS': 'Russia', 'UKR': 'Ukraine', 'USSR': 'Soviet Union',
-    'AUT': 'Austria', 'BEL': 'Belgium', 'CYP': 'Cyprus', 'DNK': 'Denmark', 
-    'FIN': 'Finland', 'FRA': 'France', 'DEU': 'Germany', 'GRC': 'Greece', 
-    'ISL': 'Iceland', 'IRL': 'Ireland', 'ITA': 'Italy', 'LUX': 'Luxembourg', 
-    'MLT': 'Malta', 'NLD': 'Netherlands', 'NOR': 'Norway', 'PRT': 'Portugal', 
-    'ESP': 'Spain', 'SWE': 'Sweden', 'CHE': 'Switzerland', 'GBR': 'United Kingdom',
-    'BHR': 'Bahrain', 'EGY': 'Egypt', 'IRN': 'Iran', 'IRQ': 'Iraq', 'ISR': 'Israel',
-    'JOR': 'Jordan', 'KWT': 'Kuwait', 'LBN': 'Lebanon', 'OMN': 'Oman', 'QAT': 'Qatar',
-    'SAU': 'Saudi Arabia', 'SYR': 'Syria', 'TUR': 'Turkey', 'ARE': 'United Arab Emirates',
+    'CZE': 'Czech Republic', 'CZSL': 'Czechoslovakia', 'EST': 'Estonia',
+    'GDR': 'East Germany', 'HUN': 'Hungary', 'XKX': 'Kosovo', 'LVA': 'Latvia',
+    'LTU': 'Lithuania', 'MKD': 'North Macedonia', 'MNE': 'Montenegro', 'POL': 'Poland',
+    'ROU': 'Romania', 'SRB': 'Serbia', 'SVK': 'Slovakia', 'SVN': 'Slovenia',
+    'YUSL': 'Yugoslavia', 'ARM': 'Armenia', 'AZE': 'Azerbaijan', 'BLR': 'Belarus',
+    'GEO': 'Georgia', 'MDA': 'Moldova', 'RUS': 'Russia', 'UKR': 'Ukraine',
+    'USSR': 'Soviet Union', 'AUT': 'Austria', 'BEL': 'Belgium', 'CYP': 'Cyprus',
+    'DNK': 'Denmark', 'FIN': 'Finland', 'FRA': 'France', 'DEU': 'Germany',
+    'GRC': 'Greece', 'ISL': 'Iceland', 'IRL': 'Ireland', 'ITA': 'Italy',
+    'LUX': 'Luxembourg', 'MLT': 'Malta', 'NLD': 'Netherlands', 'NOR': 'Norway',
+    'PRT': 'Portugal', 'ESP': 'Spain', 'SWE': 'Sweden', 'CHE': 'Switzerland',
+    'GBR': 'United Kingdom', 'BHR': 'Bahrain', 'EGY': 'Egypt', 'IRN': 'Iran',
+    'IRQ': 'Iraq', 'ISR': 'Israel', 'JOR': 'Jordan', 'KWT': 'Kuwait',
+    'LBN': 'Lebanon', 'OMN': 'Oman', 'QAT': 'Qatar', 'SAU': 'Saudi Arabia',
+    'SYR': 'Syria', 'TUR': 'Turkey', 'ARE': 'United Arab Emirates',
     'YMD': 'Yemen Democratic', 'YEM': 'Yemen'
 }
 
-def get_country_code(country_name):
-    """Find the 3-letter code for a country name"""
-    # Direct lookup
-    for code, name in COUNTRY_CODE_MAP.items():
-        if country_name.lower() == name.lower():
-            return code
-    
-    # Partial match
-    for code, name in COUNTRY_CODE_MAP.items():
-        if country_name.lower() in name.lower() or name.lower() in country_name.lower():
-            return code
-    
+# Aliases for fuzzy source-name matching (lowercased source name -> ISO code)
+_NAME_ALIASES = {
+    'türkiye': 'TUR',
+    'turkey': 'TUR',
+    "côte d'ivoire": 'CIV',
+    "cote d'ivoire": 'CIV',
+    'ivory coast': 'CIV',
+    'congo, dr': 'COD',                          # SIPRI exact name
+    'democratic republic of the congo': 'COD',
+    'dr congo': 'COD',
+    'congo, democratic republic': 'COD',
+    'congo (democratic republic)': 'COD',
+    'congo-kinshasa': 'COD',
+    'republic of the congo': 'COG',
+    'congo, republic': 'COG',                    # SIPRI exact name
+    'congo-brazzaville': 'COG',
+    'south korea': 'KOR',
+    'korea, south': 'KOR',
+    'korea, republic of': 'KOR',
+    'north korea': 'PRK',
+    'korea, north': 'PRK',
+    "korea, democratic people's republic of": 'PRK',
+    'united states': 'USA',
+    'united states of america': 'USA',
+    'russia': 'RUS',
+    'russian federation': 'RUS',
+    'iran': 'IRN',
+    'iran, islamic republic of': 'IRN',
+    'syria': 'SYR',
+    'syrian arab republic': 'SYR',
+    'vietnam': 'VNM',
+    'viet nam': 'VNM',
+    'tanzania': 'TZA',
+    'united republic of tanzania': 'TZA',
+    'moldova': 'MDA',
+    'republic of moldova': 'MDA',
+    'laos': 'LAO',
+    "lao people's democratic republic": 'LAO',
+    'bolivia': 'BOL',
+    'plurinational state of bolivia': 'BOL',
+    'venezuela': 'VEN',
+    'bolivarian republic of venezuela': 'VEN',
+    'eswatini': 'SWZ',
+    'swaziland': 'SWZ',
+    'timor leste': 'TLS',                        # SIPRI exact name (no hyphen)
+    'timor-leste': 'TLS',
+    'east timor': 'TLS',
+    'north macedonia': 'MKD',
+    'former yugoslav republic of macedonia': 'MKD',
+    'czech republic': 'CZE',
+    'czechia': 'CZE',
+    'czechoslovakia': 'CZSL',
+    'yugoslavia': 'YUSL',
+    'soviet union': 'USSR',
+    'ussr': 'USSR',
+    'east germany': 'GDR',
+    'german democratic republic': 'GDR',
+    'gambia, the': 'GMB',                        # SIPRI exact name
+    'the gambia': 'GMB',
+    'kyrgyz republic': 'KGZ',                   # SIPRI exact name
+    'kyrgyzstan': 'KGZ',
+    't\u00fcrkiye': 'TUR',                       # SIPRI encoding variant of Türkiye
+    'south sudan': 'SSD',
+    'guinea-bissau': 'GNB',
+    'equatorial guinea': 'GNQ',
+    'cape verde': 'CPV',
+    'cabo verde': 'CPV',
+    'myanmar': 'MMR',
+    'burma': 'MMR',
+}
+
+# Build reverse map: canonical name (lowercased) -> ISO code
+_CANONICAL_LOWER = {name.lower(): code for code, name in COUNTRY_CODE_MAP.items()}
+
+
+def resolve_iso(country_name: str) -> str | None:
+    """Resolve a source country name to an ISO code. Returns None if not found."""
+    key = country_name.strip().lower()
+    # 1. Alias lookup (covers variants, special chars, alternate names)
+    if key in _NAME_ALIASES:
+        return _NAME_ALIASES[key]
+    # 2. Canonical name exact match
+    if key in _CANONICAL_LOWER:
+        return _CANONICAL_LOWER[key]
+    # 3. No match — do NOT fall through to substring matching (causes false positives)
     return None
 
-def find_excel_files(directory):
-    """
-    Recursively find all Excel files in directory and subdirectories
-    """
-    excel_files = []
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            if file.endswith(('.xlsx', '.xls')) and not file.startswith('~'):  # Ignore temp files
-                excel_files.append(os.path.join(root, file))
-    return excel_files
+
+def find_excel_files(directory: str) -> list[str]:
+    """Recursively find all non-temporary Excel files, skipping the output folder."""
+    output_path = os.path.normpath(os.path.join(directory, OUTPUT_DIR))
+    files = []
+    for root, dirs, names in os.walk(directory):
+        # Skip the output folder so we never pick up our own generated files
+        dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(root, d)) != output_path]
+        for name in names:
+            if name.endswith(('.xlsx', '.xls')) and not name.startswith('~'):
+                files.append(os.path.join(root, name))
+    return files
+
 
 def read_milex_data():
     """
-    Reads the SIPRI Military Expenditure Database Excel file and processes the 'Current US$' sheet
-    Scans current directory and subdirectories for Excel files
+    Locates the SIPRI Excel file, finds the 'Current US$' sheet, detects the
+    header row dynamically, and returns a clean DataFrame with columns
+    ['Country', year1, year2, ...].
     """
-    # Scan current directory and subdirectories for Excel files
     current_dir = os.getcwd()
     excel_files = find_excel_files(current_dir)
-    
+
     if not excel_files:
         print("No Excel files found in current directory and subdirectories")
         return None
-    
+
     print(f"Found {len(excel_files)} Excel file(s):")
-    for i, file in enumerate(excel_files, 1):
-        rel_path = os.path.relpath(file, current_dir)
-        print(f"  {i}. {rel_path}")
-    
-    # Look for SIPRI source files, avoiding our own output files
+    for i, f in enumerate(excel_files, 1):
+        print(f"  {i}. {os.path.relpath(f, current_dir)}")
+
+    # Pick the SIPRI source file (skip our own output files)
     sipri_file = None
-    
-    # First, look for SIPRI source files
-    for file in excel_files:
-        filename = os.path.basename(file).lower()
-        # Skip our own output files
-        if 'milex_data_' in filename and '_mapped' in filename:
+    for f in excel_files:
+        base = os.path.basename(f).lower()
+        if '_mapped' in base or 'milex_data_output' in base:
             continue
-        if 'milex_data_output' in filename:
-            continue
-            
-        # Look for SIPRI source indicators
-        if any(keyword in filename for keyword in ['sipri', 'milex-data', 'military']):
-            sipri_file = file
+        if any(kw in base for kw in ['sipri', 'milex-data', 'military']) or 'downloads' in f.lower():
+            sipri_file = f
             break
-    
-    # If no SIPRI file found, look in downloads folder specifically
     if not sipri_file:
-        for file in excel_files:
-            if 'downloads' in file.lower() and not ('milex_data_' in os.path.basename(file).lower()):
-                sipri_file = file
+        # fallback: first non-output file
+        for f in excel_files:
+            if '_mapped' not in os.path.basename(f).lower():
+                sipri_file = f
                 break
-    
-    # Final fallback - use first non-output file
     if not sipri_file:
-        for file in excel_files:
-            filename = os.path.basename(file).lower()
-            if not ('milex_data_' in filename and '_mapped' in filename):
-                sipri_file = file
-                break
-    
-    # Last resort
-    if not sipri_file and excel_files:
         sipri_file = excel_files[0]
-    
-    excel_file = sipri_file
-    rel_path = os.path.relpath(excel_file, current_dir)
-    print(f"Using Excel file: {rel_path}")
-    
+
+    print(f"Using: {os.path.relpath(sipri_file, current_dir)}")
+
     try:
-        # Read all sheet names first
-        xl_file = pd.ExcelFile(excel_file)
-        print(f"Available sheets: {xl_file.sheet_names}")
-        
-        # Look for the "Current US$" sheet
-        current_usd_sheet = None
-        for sheet_name in xl_file.sheet_names:
-            if "Current US$" in sheet_name or "current us$" in sheet_name.lower():
-                current_usd_sheet = sheet_name
+        xl = pd.ExcelFile(sipri_file)
+        print(f"Sheets: {xl.sheet_names}")
+
+        # Find the target sheet (Current US$), fall back to first sheet
+        target_sheet = next(
+            (s for s in xl.sheet_names if SIPRI_SHEET.lower() in s.lower()),
+            xl.sheet_names[0]
+        )
+        print(f"Reading sheet: {target_sheet}")
+
+        # Read raw to detect header row (row with 'Country' + year integers)
+        raw = pd.read_excel(sipri_file, sheet_name=target_sheet, header=None)
+
+        header_idx = None
+        for i in range(min(15, len(raw))):
+            row = raw.iloc[i]
+            first = str(row.iloc[0]).strip().lower()
+            if 'country' not in first:
+                continue
+            years_found = sum(
+                1 for v in row.iloc[1:]
+                if (isinstance(v, (int, float)) and not pd.isna(v) and 1900 <= int(v) <= 2100)
+                or (isinstance(v, str) and v.isdigit() and 1900 <= int(v) <= 2100)
+            )
+            if years_found >= 10:
+                header_idx = i
                 break
-        
-        if not current_usd_sheet:
-            print("Could not find 'Current US$' sheet. Available sheets:")
-            for sheet in xl_file.sheet_names:
-                print(f"  - {sheet}")
-            # Use first sheet as fallback
-            current_usd_sheet = xl_file.sheet_names[0]
-            print(f"Using first sheet as fallback: {current_usd_sheet}")
-        
-        # Read the specific sheet and dynamically detect the header structure
-        print(f"Reading sheet: {current_usd_sheet}")
-        
-        # First, read raw data to find the header row
-        df_raw = pd.read_excel(excel_file, sheet_name=current_usd_sheet)
-        
-        # Find the header row (look for 'Country' in first column and years in subsequent columns)
-        header_row_idx = None
-        detected_years = []
-        
-        for i in range(min(10, len(df_raw))):  # Check first 10 rows
-            row = df_raw.iloc[i]
-            first_col = str(row.iloc[0]).strip().lower()
-            
-            if 'country' in first_col:
-                # Check if this row has years in subsequent columns
-                years_in_row = []
-                for j in range(1, len(row)):
-                    cell = row.iloc[j]
-                    if isinstance(cell, (int, float)) and not pd.isna(cell):
-                        year = int(cell)
-                        if 1900 <= year <= 2100:  # Reasonable year range
-                            years_in_row.append(year)
-                    elif isinstance(cell, str) and cell.isdigit():
-                        year = int(cell)
-                        if 1900 <= year <= 2100:
-                            years_in_row.append(year)
-                
-                if len(years_in_row) >= 10:  # Must have at least 10 years to be a valid header
-                    header_row_idx = i
-                    detected_years = years_in_row
-                    break
-        
-        if header_row_idx is None:
-            print("Could not find header row with years, using default row 4")
-            header_row_idx = 4
-        
-        print(f"Found header at row {header_row_idx}")
-        
-        # Get the actual header values from the detected row
-        header_values = df_raw.iloc[header_row_idx].values
-        
-        print(f"Detected header values: {list(header_values[:5])}...{list(header_values[-5:])}")
-        
-        # Read the data starting from after the header row, but include one extra row to align properly
-        df = pd.read_excel(excel_file, sheet_name=current_usd_sheet, skiprows=header_row_idx+1)
-        
-        # Ensure we have the right number of columns and apply header values
-        if len(header_values) <= len(df.columns):
-            # Use only the columns that have corresponding headers
-            df = df.iloc[:, :len(header_values)]
-            df.columns = header_values
-            print(f"Applied {len(header_values)} header values to data columns")
-        else:
-            print(f"Header has more values ({len(header_values)}) than data columns ({len(df.columns)})")
-            # Pad with NaN columns if needed
-            for i in range(len(df.columns), len(header_values)):
-                df[f'Extra_{i}'] = None
-            df.columns = header_values
-        
-        print(f"Applied header columns: {list(df.columns[:5])}...{list(df.columns[-5:])}")
-        
-        # Build the column structure dynamically
-        # Process each column and build lists of columns to keep vs skip
-        columns_to_keep = []
-        new_column_names = []
-        year_columns = []
-        
-        for i, col in enumerate(df.columns):
-            if i == 0 and ('country' in str(col).lower() or pd.isna(col)):
-                columns_to_keep.append(i)
-                new_column_names.append('Country')
-            elif isinstance(col, (int, float)) and not pd.isna(col):
+
+        if header_idx is None:
+            print("Warning: could not detect header row, defaulting to row 4")
+            header_idx = 4
+
+        print(f"Header row detected at index {header_idx}")
+
+        # Read with detected header
+        df = pd.read_excel(sipri_file, sheet_name=target_sheet, header=header_idx)
+
+        # Rename first column to 'Country'
+        df.rename(columns={df.columns[0]: 'Country'}, inplace=True)
+
+        # Keep only Country + integer year columns; drop notes/unknown columns
+        year_cols = []
+        cols_to_keep = ['Country']
+        for col in df.columns[1:]:
+            if isinstance(col, (int, float)) and not pd.isna(col) and 1900 <= int(col) <= 2100:
                 year = int(col)
+                df.rename(columns={col: year}, inplace=True)
+                cols_to_keep.append(year)
+                year_cols.append(year)
+            elif isinstance(col, str) and col.strip().isdigit():
+                year = int(col.strip())
                 if 1900 <= year <= 2100:
-                    columns_to_keep.append(i)
-                    new_column_names.append(year)
-                    year_columns.append(year)
-                else:
-                    print(f"Skipping non-year column at position {i}: {col}")
-            elif isinstance(col, str):
-                if col.isdigit():
-                    year = int(col)
-                    if 1900 <= year <= 2100:
-                        columns_to_keep.append(i)
-                        new_column_names.append(year)
-                        year_columns.append(year)
-                    else:
-                        print(f"Skipping non-year column at position {i}: {col}")
-                elif 'note' in col.lower():
-                    print(f"Skipping notes column at position {i}: {col}")
-                    # Don't add to columns_to_keep - this column will be dropped
-                else:
-                    print(f"Skipping unknown column at position {i}: {col}")
-            else:
-                print(f"Skipping unrecognized column at position {i}: {col}")
-        
-        # Keep only the columns we want using specific column indices
-        df = df.iloc[:, columns_to_keep]
-        df.columns = new_column_names
-        
-        if year_columns:
-            min_year = min(year_columns)
-            max_year = max(year_columns)
-            print(f"Successfully mapped columns: Country + {len(year_columns)} years ({min_year}-{max_year})")
-        else:
-            print("Error: No year columns detected in the data!")
-            print("This may not be a SIPRI military expenditure data file.")
-            return None
-        
-        # Remove any empty rows at the beginning
-        df = df.dropna(subset=['Country'])
-        df = df[df['Country'] != '']
+                    df.rename(columns={col: year}, inplace=True)
+                    cols_to_keep.append(year)
+                    year_cols.append(year)
+            # else: silently drop notes/unknown columns
+
+        df = df[cols_to_keep].copy()
+
+        # Drop rows with no country name or header-repetition rows
         df = df[df['Country'].notna()]
-        
-        print(f"Data shape after cleaning: {df.shape}")
-        print(f"Column headers: {list(df.columns[:10])}...")  # Show first 10
-        print("\nFirst few rows:")
-        if len(year_columns) >= 5:
-            recent_years = year_columns[-5:]  # Last 5 years
-            print(df[['Country'] + recent_years].head())
-            
-            # Debug: Check USA data specifically
-            print("\n=== DEBUG USA DATA ===")
-            usa_rows = df[df['Country'].str.contains('United States', na=False)]
-            if len(usa_rows) > 0:
-                usa_row = usa_rows.iloc[0]
-                print("USA data for last 5 years:")
-                for year in recent_years:
-                    value = usa_row[year]
-                    print(f"  {year}: {value}")
-        else:
-            print(df.head())
-        
-        return df, current_usd_sheet, excel_file
-        
+        df = df[df['Country'].astype(str).str.strip() != '']
+        df = df[df['Country'].astype(str).str.lower() != 'country']
+        df = df.reset_index(drop=True)
+
+        if not year_cols:
+            print("Error: no year columns detected — is this a SIPRI expenditure file?")
+            return None
+
+        print(f"Loaded {len(df)} countries, years {min(year_cols)}-{max(year_cols)}")
+        return df, target_sheet, sipri_file
+
     except Exception as e:
         print(f"Error reading Excel file: {e}")
         return None
 
-def create_country_mapping(df):
+
+def build_iso_lookup(df: pd.DataFrame) -> dict:
     """
-    Creates a mapping of countries and their military expenditure data
+    Build a dict: ISO code -> pandas Series (one row of source data).
+    Iterates source countries once — O(n).
+    Warns on duplicate matches so ambiguity is visible.
+    """
+    lookup = {}
+    unmatched = []
+
+    for _, row in df.iterrows():
+        name = str(row['Country']).strip()
+        if not name or name.lower() == 'country':
+            continue
+        iso = resolve_iso(name)
+        if iso:
+            if iso in lookup:
+                print(f"  Duplicate match for {iso}: '{name}' vs existing '{lookup[iso]['Country']}' — keeping first")
+            else:
+                lookup[iso] = row
+        else:
+            unmatched.append(name)
+
+    if unmatched:
+        print(f"\nUnmatched source countries ({len(unmatched)}) — no ISO code found:")
+        for n in unmatched:
+            print(f"  - {n}")
+
+    print(f"\nISO lookup built: {len(lookup)} countries matched")
+    return lookup
+
+
+MISSING_PLACEHOLDERS = frozenset({'...', 'xxx', 'x', 'n/a', 'na', '', 'none'})
+
+
+def _safe_float(value) -> float:
+    """Convert a cell value to float. Returns NaN for missing/invalid values."""
+    if pd.isna(value):
+        return np.nan
+    if isinstance(value, str) and value.strip().lower() in MISSING_PLACEHOLDERS:
+        return np.nan
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return np.nan
+
+
+def create_milex_format(df: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Produces a DataFrame in the MILEX_DATA format:
+      - Index: integer years
+      - Columns: HARDCODED_COUNTRY_COLUMNS (e.g. 'DZA.MILEX.A')
+      - Row 0 (header label row): 'Military expenditure, <Country Name>'
+      - Rows 1+: numeric expenditure values (NaN where no data)
     """
     if df is None:
         return None
-    
-    # Assuming the first column contains country names
-    # and subsequent columns contain years with expenditure data
-    
-    country_column = df.columns[0]  # First column (usually country names)
-    year_columns = df.columns[1:]   # Remaining columns (usually years)
-    
-    print(f"\nCountry column: {country_column}")
-    print(f"Year columns: {list(year_columns)}")
-    
-    # Create mapping dictionary
-    country_mapping = {}
-    
-    for index, row in df.iterrows():
-        country = row[country_column]
-        if pd.notna(country) and country != '':  # Skip empty country names
-            country_data = {}
-            for year_col in year_columns:
-                value = row[year_col]
-                if pd.notna(value):
-                    country_data[str(year_col)] = value
-            
-            if country_data:  # Only add if country has data
-                country_mapping[country] = country_data
-    
-    return country_mapping
 
-def display_mapping_summary(mapping):
-    """
-    Displays a summary of the country mapping
-    """
-    if not mapping:
-        print("No mapping data available")
-        return
-    
-    print(f"\n=== MILITARY EXPENDITURE MAPPING SUMMARY ===")
-    print(f"Total countries: {len(mapping)}")
-    
-    # Get years available
-    all_years = set()
-    for country_data in mapping.values():
-        all_years.update(country_data.keys())
-    
-    years_list = sorted(all_years)
-    print(f"Years covered: {min(years_list)} - {max(years_list)}")
-    print(f"Total years: {len(years_list)}")
-    
-    print(f"\nFirst 10 countries:")
-    for i, (country, data) in enumerate(list(mapping.items())[:10]):
-        latest_year = max(data.keys()) if data else "N/A"
-        latest_value = data.get(latest_year, "N/A") if data else "N/A"
-        print(f"  {i+1}. {country}: Latest data ({latest_year}): {latest_value}")
-    
-    return years_list
-
-def get_country_data(mapping, country_name):
-    """
-    Gets military expenditure data for a specific country
-    """
-    if not mapping or country_name not in mapping:
-        print(f"No data found for country: {country_name}")
+    year_cols = sorted(c for c in df.columns if isinstance(c, int))
+    if not year_cols:
+        print("Error: no year columns in source data")
         return None
-    
-    country_data = mapping[country_name]
-    print(f"\n=== MILITARY EXPENDITURE DATA FOR {country_name.upper()} ===")
-    
-    for year, value in sorted(country_data.items()):
-        print(f"{year}: {value}")
-    
-    return country_data
 
-def get_year_data(mapping, year):
-    """
-    Gets military expenditure data for all countries in a specific year
-    """
-    if not mapping:
-        print("No mapping data available")
-        return None
-    
-    year_str = str(year)
-    year_data = {}
-    
-    for country, country_data in mapping.items():
-        if year_str in country_data:
-            year_data[country] = country_data[year_str]
-    
-    if not year_data:
-        print(f"No data found for year: {year}")
-        return None
-    
-    print(f"\n=== MILITARY EXPENDITURE DATA FOR {year} ===")
-    # Sort by expenditure value (descending)
-    sorted_data = sorted(year_data.items(), key=lambda x: float(x[1]) if isinstance(x[1], (int, float)) else 0, reverse=True)
-    
-    for i, (country, value) in enumerate(sorted_data[:20], 1):  # Show top 20
-        print(f"{i:2d}. {country}: {value}")
-    
-    return year_data
+    print(f"\nBuilding MILEX format: {len(HARDCODED_COUNTRY_COLUMNS)} countries × {len(year_cols)} years "
+          f"({min(year_cols)}-{max(year_cols)})")
 
-def create_milex_format(df):
-    """
-    Creates the exact MILEX_DATA format matching MILEX_DATA_20250429 structure
-    Uses hardcoded country column order for consistency
-    """
-    if df is None:
-        return None
-    
-    print("Creating MILEX_DATA format with hardcoded column order...")
-    
-    # Get years from source data dynamically
-    year_columns = [col for col in df.columns if isinstance(col, int)]
-    years = sorted(year_columns)
-    
-    print(f"Processing years: {min(years)} to {max(years)}")
-    
-    # Create the result dataframe with years as rows and countries as columns
-    result_data = []
-    
-    # Create the header row with country names (using hardcoded order) - will be handled separately
-    header_row = [None]  # First column is empty in header
-    
-    # Create country name mapping for headers
-    for country_column in HARDCODED_COUNTRY_COLUMNS:
-        country_code = country_column.split('.')[0]
-        country_name = COUNTRY_CODE_MAP.get(country_code, country_code)
-        header_row.append(f"Military expenditure, {country_name}")
-    
-    # Don't append header_row to result_data - it will be handled when saving to Excel
-    
-    # Create a lookup dictionary for source data (country name -> row data)
-    source_data_lookup = {}
-    for index, row in df.iterrows():
-        country_name = row['Country']
-        if pd.notna(country_name) and country_name != '' and country_name != 'Country':
-            source_data_lookup[country_name] = row
-    
-    # Add data rows for each year
-    for year in years:
-        year_row = [float(year)]  # First column is the year
-        
-        # For each hardcoded country column, get the data for this year
-        for country_column in HARDCODED_COUNTRY_COLUMNS:
-            country_code = country_column.split('.')[0]
-            expected_country_names = [COUNTRY_CODE_MAP.get(country_code, '')]
-            
-            # Find matching country in source data with flexible matching
-            value = 0  # Default value
-            found = False
-            
-            for src_country_name, src_row in source_data_lookup.items():
-                # Try different matching strategies
-                matched = False
-                
-                # Direct country code match
-                if get_country_code(src_country_name) == country_code:
-                    matched = True
-                
-                # Alternative name matching for special cases
-                if not matched:
-                    src_lower = src_country_name.lower()
-                    expected_lower = expected_country_names[0].lower()
-                    
-                    if (src_lower in expected_lower or expected_lower in src_lower or
-                        # Special cases
-                        (country_code == 'TUR' and 'türkiye' in src_lower) or
-                        (country_code == 'CIV' and 'ivoire' in src_lower) or
-                        (country_code == 'COD' and 'congo' in src_lower and 'democratic' in src_lower) or
-                        (country_code == 'COG' and 'congo' in src_lower and 'republic' in src_lower and 'democratic' not in src_lower)):
-                        matched = True
-                
-                if matched:
-                    if year in src_row.index:
-                        cell_value = src_row[year]
-                        if pd.notna(cell_value) and cell_value != '...' and cell_value != 'xxx' and cell_value != '':
-                            try:
-                                value = float(cell_value)
-                                found = True
-                            except (ValueError, TypeError):
-                                value = 0
-                    break
-            
-            # Suppress verbose "not found" messages for cleaner output
-            # Only show warnings for recent years when data should exist
-            if not found and country_code not in ['YMD', 'YUSL', 'USSR', 'GDR', 'CZSL'] and year >= 2020:
-                print(f"Warning: No recent data for {country_code} ({COUNTRY_CODE_MAP.get(country_code, country_code)}) in {year}")
-            
-            year_row.append(value)
-        
-        result_data.append(year_row)
-    
-    # Create DataFrame with hardcoded column structure
-    # Insert header row at the beginning
-    all_data = [header_row] + result_data
-    columns = ['Unnamed: 0'] + HARDCODED_COUNTRY_COLUMNS
-    result_df = pd.DataFrame(all_data, columns=columns)
-    
-    print(f"Created MILEX format with shape: {result_df.shape}")
-    print(f"Countries: {len(HARDCODED_COUNTRY_COLUMNS)}")
-    print(f"Years: {len(years)}")
-    
-    return result_df
+    # Build source lookup once — O(n)
+    iso_lookup = build_iso_lookup(df)
 
-def save_milex_format(df, source_file_path=None):
+    # --- Header label row ---
+    header = {col: f"Military expenditure, {COUNTRY_CODE_MAP.get(col.split('.')[0], col.split('.')[0])}"
+              for col in HARDCODED_COUNTRY_COLUMNS}
+    header_row = pd.Series(header, name='label').reindex(HARDCODED_COUNTRY_COLUMNS)
+
+    # --- Data rows: one per year ---
+    data_rows = {}
+    missing_recent = []
+
+    for year in year_cols:
+        row = {}
+        for col in HARDCODED_COUNTRY_COLUMNS:
+            iso = col.split('.')[0]
+            if iso in iso_lookup:
+                src_row = iso_lookup[iso]
+                row[col] = _safe_float(src_row.get(year, np.nan))
+            else:
+                row[col] = np.nan
+        data_rows[year] = row
+
+    result = pd.DataFrame(data_rows, index=HARDCODED_COUNTRY_COLUMNS).T
+    result.index.name = YEAR_COL
+    # Enforce fixed column order — pandas can silently reorder when building from dicts
+    result = result.reindex(columns=HARDCODED_COUNTRY_COLUMNS)
+
+    # Warn about countries with no recent data (last 5 years)
+    recent_years = year_cols[-5:]
+    for col in HARDCODED_COUNTRY_COLUMNS:
+        iso = col.split('.')[0]
+        # Skip dissolved states
+        if iso in HISTORICAL_CODES:
+            continue
+        if iso not in iso_lookup:
+            missing_recent.append(iso)
+        else:
+            recent_vals = [_safe_float(iso_lookup[iso].get(y, np.nan)) for y in recent_years]
+            if all(np.isnan(v) for v in recent_vals):
+                missing_recent.append(iso)
+
+    if missing_recent:
+        print(f"\nCountries with no data in last 5 years ({len(missing_recent)}):")
+        for iso in missing_recent:
+            print(f"  - {iso} ({COUNTRY_CODE_MAP.get(iso, iso)})")
+
+    print(f"\nMILEX format shape: {result.shape}")
+    return result, header_row
+
+
+def save_milex_format(result_df: pd.DataFrame, header_row: pd.Series, source_file_path: str = None) -> str | None:
     """
-    Saves the MILEX format data to Excel file with dynamic naming
+    Saves the MILEX format to Excel.
+
+    Output structure:
+      Row 1 (Excel row 2): country label headers  e.g. "Military expenditure, Algeria"
+      Row 2+ (Excel rows 3+): year + numeric data
+
+    The year index is written as the first column labeled 'Year'.
     """
-    if df is None:
+    if result_df is None:
         print("No data to save")
-        return
-    
-    # Generate dynamic filename based on source file or current date
-    from datetime import datetime
-    
+        return None
+
+    # Dynamic filename from source file or today's date
     if source_file_path:
-        # Extract base name from source file
-        source_base = os.path.splitext(os.path.basename(source_file_path))[0]
-        # Clean up the name
-        clean_name = source_base.replace('SIPRI-', '').replace('Milex-', '').replace('data-', '')
-        filename = f"MILEX_DATA_{clean_name}_MAPPED.xlsx"
+        base = os.path.splitext(os.path.basename(source_file_path))[0]
+        base = base.replace('SIPRI-', '').replace('Milex-', '').replace('data-', '')
+        filename = f"MILEX_DATA_{base}_MAPPED.xlsx"
     else:
-        # Use current date as fallback
-        current_date = datetime.now().strftime("%Y%m%d")
-        filename = f"MILEX_DATA_{current_date}_MAPPED.xlsx"
-    
-    filepath = os.path.join(os.getcwd(), filename)
-    
-    # Handle file conflicts
+        filename = f"MILEX_DATA_{datetime.now().strftime('%Y%m%d')}_MAPPED.xlsx"
+
+    output_folder = os.path.join(os.getcwd(), OUTPUT_DIR)
+    os.makedirs(output_folder, exist_ok=True)
+
+    filepath = os.path.join(output_folder, filename)
+    # Avoid overwriting existing files
     counter = 1
-    original_filepath = filepath
+    stem = os.path.splitext(filepath)[0]
     while os.path.exists(filepath):
-        name_part = os.path.splitext(original_filepath)[0]
-        ext_part = os.path.splitext(original_filepath)[1]
-        filepath = f"{name_part}_{counter}{ext_part}"
+        filepath = f"{stem}_{counter}.xlsx"
         counter += 1
-    
+
     try:
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='DATA', index=False)
-        
-        print(f"MILEX format data saved to: {os.path.basename(filepath)}")
+            # Write label header row first (reset_index so Year column appears)
+            label_df = pd.DataFrame([header_row], columns=HARDCODED_COUNTRY_COLUMNS)
+            label_df.insert(0, YEAR_COL, '')
+            label_df.to_excel(writer, sheet_name=SHEET_NAME, index=False, startrow=0)
+
+            # Write data rows below (startrow=1 to sit directly under header)
+            data_out = result_df.reset_index()  # brings Year back as column
+            data_out = data_out[[YEAR_COL] + HARDCODED_COUNTRY_COLUMNS]  # enforce order
+            data_out.to_excel(writer, sheet_name=SHEET_NAME, index=False,
+                              startrow=1, header=False)
+
+        print(f"\nSaved: {os.path.basename(filepath)}")
         return filepath
-    
+
     except Exception as e:
         print(f"Error saving file: {e}")
         return None
 
+
 def main():
-    """
-    Main function to create MILEX_DATA format from SIPRI data
-    """
     print("SIPRI to MILEX_DATA Format Converter")
     print("=" * 50)
-    
-    # Read the SIPRI Excel file
+
     result = read_milex_data()
     if not result:
         return None, None
-    
+
     df, sheet_name, source_file_path = result
-    
-    # Create MILEX format
-    milex_df = create_milex_format(df)
-    
-    if milex_df is not None:
-        # Save to file with dynamic naming based on source file
-        output_file = save_milex_format(milex_df, source_file_path)
-        
-        # Display sample data
-        print(f"\n=== SAMPLE OUTPUT (First 5 rows, First 10 columns) ===")
-        sample_cols = milex_df.columns[:10] if len(milex_df.columns) >= 10 else milex_df.columns
-        print(milex_df[sample_cols].head())
-        
-        # Show some statistics
-        numeric_cols = [col for col in milex_df.columns if col != 'Unnamed: 0']
-        if len(numeric_cols) > 0 and len(milex_df) > 1:
-            print(f"\n=== STATISTICS ===")
-            print(f"Total countries: {len(numeric_cols)}")
-            print(f"Years covered: 1949-2024")
-            
-            # Show top countries for latest year (2024)
-            latest_year_data = milex_df.iloc[-1]  # Last row is 2024
-            country_values = []
-            for i, col in enumerate(numeric_cols):
-                if i < len(latest_year_data) - 1:  # Skip year column
-                    value = latest_year_data.iloc[i + 1]  # +1 to skip year column
-                    if pd.notna(value) and value > 0:
-                        country_code = col.split('.')[0]
-                        country_name = COUNTRY_CODE_MAP.get(country_code, country_code)
-                        country_values.append((country_name, value))
-            
-            # Sort by expenditure and show top 10
-            country_values.sort(key=lambda x: x[1], reverse=True)
-            print(f"\n=== TOP 10 MILITARY SPENDERS IN 2024 ===")
-            for i, (country, value) in enumerate(country_values[:10], 1):
-                print(f"{i:2d}. {country}: ${value:,.0f} million")
-    
-    return milex_df, output_file
+
+    milex_result = create_milex_format(df)
+    if milex_result is None:
+        return None, None
+
+    result_df, header_row = milex_result
+    output_file = save_milex_format(result_df, header_row, source_file_path)
+
+    if output_file:
+        # --- Dynamic summary ---
+        years = result_df.index.tolist()
+        print(f"\n=== SUMMARY ===")
+        print(f"Countries: {len(result_df.columns)}")
+        print(f"Years: {min(years)}-{max(years)} ({len(years)} total)")
+
+        # Top spenders in the most recent year that has any data
+        for latest_year in reversed(years):
+            year_series = result_df.loc[latest_year]
+            ranked = (
+                year_series.dropna()
+                           .sort_values(ascending=False)
+            )
+            if ranked.empty:
+                continue
+            print(f"\n=== TOP 10 MILITARY SPENDERS IN {latest_year} ===")
+            for i, (col, val) in enumerate(ranked.head(10).items(), 1):
+                iso = col.split('.')[0]
+                name = COUNTRY_CODE_MAP.get(iso, iso)
+                print(f"  {i:2d}. {name}: ${val:,.0f} million")
+            break
+
+    return result_df, output_file
+
 
 if __name__ == "__main__":
     milex_df, output_file = main()

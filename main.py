@@ -6,6 +6,28 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import os
+import subprocess
+import re
+
+def get_chrome_major_version():
+    """Detects the installed Chrome major version on any platform."""
+    commands = [
+        # Windows registry
+        r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
+        r'reg query "HKLM\SOFTWARE\Google\Chrome\BLBeacon" /v version',
+        # Windows file version fallback
+        r'powershell -command "(Get-Item \"C:\Program Files\Google\Chrome\Application\chrome.exe\").VersionInfo.FileVersion"',
+        r'powershell -command "(Get-Item \"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe\").VersionInfo.FileVersion"',
+    ]
+    for cmd in commands:
+        try:
+            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+            match = re.search(r'(\d+)\.\d+\.\d+\.\d+', output)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            continue
+    return None
 
 def download_sipri_military_database():
     """
@@ -40,7 +62,13 @@ def download_sipri_military_database():
     try:
         # Initialize the driver
         print("Initializing Chrome driver...")
-        driver = uc.Chrome(options=options, version_main=139)
+        chrome_version = get_chrome_major_version()
+        if chrome_version:
+            print(f"Detected Chrome version: {chrome_version}")
+            driver = uc.Chrome(options=options, version_main=chrome_version)
+        else:
+            print("Could not detect Chrome version, using auto-detection...")
+            driver = uc.Chrome(options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         # Navigate to SIPRI homepage
