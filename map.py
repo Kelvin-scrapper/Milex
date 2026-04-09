@@ -1,12 +1,33 @@
+"""
+SIPRI Military Expenditure — Data Mapper
+==========================================
+Dataset : MILEX
+Input   : downloads/SIPRI-Milex-data-*.xlsx  (raw SIPRI workbook)
+Output  : output/MILEX_DATA_{YYYYMMDD}.xlsx
+          output/MILEX_META_{YYYYMMDD}.xlsx
+          output/MILEX_{YYYYMMDD}.ZIP
+Usage   : python map.py
+"""
+
+import io
+import zipfile
 import pandas as pd
 import numpy as np
 import os
+import openpyxl
 from datetime import datetime
 
-SHEET_NAME = "DATA"
-YEAR_COL = "Year"
-SIPRI_SHEET = "Current US$"       # sheet name in SIPRI source file
-OUTPUT_DIR = "output"             # all output files go here
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+DATASET_CODE  = "MILEX"
+OUTPUT_PREFIX = "MILEX"
+SHEET_NAME    = "DATA"
+YEAR_COL      = "Year"
+SIPRI_SHEET   = "Current US$"       # target sheet in SIPRI source workbook
+OUTPUT_DIR    = "output"            # all output files go here
+SOURCE_DIR    = "downloads"         # where scraper.py places the raw file
+
 # ISO codes for dissolved/historical states — expected to have no recent data
 HISTORICAL_CODES = frozenset({'YMD', 'YUSL', 'USSR', 'GDR', 'CZSL'})
 
@@ -181,7 +202,12 @@ def resolve_iso(country_name: str) -> str | None:
     return None
 
 
-def find_excel_files(directory: str) -> list[str]:
+def _parse_period(year: int) -> str:
+    """Convert an integer year to the YYYY period string."""
+    return str(year)
+
+
+def _find_excel_files(directory: str) -> list[str]:
     """Recursively find all non-temporary Excel files, skipping the output folder."""
     output_path = os.path.normpath(os.path.join(directory, OUTPUT_DIR))
     files = []
@@ -194,14 +220,26 @@ def find_excel_files(directory: str) -> list[str]:
     return files
 
 
-def read_milex_data():
+def _safe_float(value) -> float:
+    """Strip commas/symbols and return float. Returns NaN for missing/invalid values."""
+    if pd.isna(value):
+        return np.nan
+    if isinstance(value, str) and value.strip().lower() in MISSING_PLACEHOLDERS:
+        return np.nan
+    try:
+        return float(str(value).replace(',', ''))
+    except (ValueError, TypeError):
+        return np.nan
+
+
+def _load_source():
     """
     Locates the SIPRI Excel file, finds the 'Current US$' sheet, detects the
     header row dynamically, and returns a clean DataFrame with columns
     ['Country', year1, year2, ...].
     """
     current_dir = os.getcwd()
-    excel_files = find_excel_files(current_dir)
+    excel_files = _find_excel_files(current_dir)
 
     if not excel_files:
         print("No Excel files found in current directory and subdirectories")
@@ -309,7 +347,7 @@ def read_milex_data():
         return None
 
 
-def build_iso_lookup(df: pd.DataFrame) -> dict:
+def _build_iso_lookup(df: pd.DataFrame) -> dict:
     """
     Build a dict: ISO code -> pandas Series (one row of source data).
     Iterates source countries once — O(n).
@@ -343,19 +381,7 @@ def build_iso_lookup(df: pd.DataFrame) -> dict:
 MISSING_PLACEHOLDERS = frozenset({'...', 'xxx', 'x', 'n/a', 'na', '', 'none'})
 
 
-def _safe_float(value) -> float:
-    """Convert a cell value to float. Returns NaN for missing/invalid values."""
-    if pd.isna(value):
-        return np.nan
-    if isinstance(value, str) and value.strip().lower() in MISSING_PLACEHOLDERS:
-        return np.nan
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return np.nan
-
-
-def create_milex_format(df: pd.DataFrame) -> pd.DataFrame | None:
+def _extract_data(df: pd.DataFrame) -> pd.DataFrame | None:
     """
     Produces a DataFrame in the MILEX_DATA format:
       - Index: integer years
@@ -375,7 +401,7 @@ def create_milex_format(df: pd.DataFrame) -> pd.DataFrame | None:
           f"({min(year_cols)}-{max(year_cols)})")
 
     # Build source lookup once — O(n)
-    iso_lookup = build_iso_lookup(df)
+    iso_lookup = _build_iso_lookup(df)
 
     # --- Header label row ---
     header = {col: f"Military expenditure, {COUNTRY_CODE_MAP.get(col.split('.')[0], col.split('.')[0])}"
@@ -425,33 +451,24 @@ def create_milex_format(df: pd.DataFrame) -> pd.DataFrame | None:
     return result, header_row
 
 
-def save_milex_format(result_df: pd.DataFrame, header_row: pd.Series, source_file_path: str = None) -> str | None:
+def _save_data(result_df: pd.DataFrame, header_row: pd.Series, run_date: str) -> str | None:
     """
-    Saves the MILEX format to Excel.
-
-    Output structure:
-      Row 1 (Excel row 2): country label headers  e.g. "Military expenditure, Algeria"
-      Row 2+ (Excel rows 3+): year + numeric data
-
-    The year index is written as the first column labeled 'Year'.
+    Write DATA Excel file.
+    Structure:
+      Row 1 (col headers): Year | DZA.MILEX.A | LBY.MILEX.A | ...
+      Row 2 (label row):   ''  | Military expenditure, Algeria | ...
+      Row 3+:              1949 | 0.0 | 123.4 | ...
+    Numeric cells get comma number format (#,##0.##).
+    Returns the saved filepath.
     """
     if result_df is None:
         print("No data to save")
         return None
 
-    # Dynamic filename from source file or today's date
-    if source_file_path:
-        base = os.path.splitext(os.path.basename(source_file_path))[0]
-        base = base.replace('SIPRI-', '').replace('Milex-', '').replace('data-', '')
-        filename = f"MILEX_DATA_{base}_MAPPED.xlsx"
-    else:
-        filename = f"MILEX_DATA_{datetime.now().strftime('%Y%m%d')}_MAPPED.xlsx"
-
     output_folder = os.path.join(os.getcwd(), OUTPUT_DIR)
     os.makedirs(output_folder, exist_ok=True)
+    filepath = os.path.join(output_folder, f"{OUTPUT_PREFIX}_DATA_{run_date}.xlsx")
 
-    filepath = os.path.join(output_folder, filename)
-    # Avoid overwriting existing files
     counter = 1
     stem = os.path.splitext(filepath)[0]
     while os.path.exists(filepath):
@@ -460,67 +477,143 @@ def save_milex_format(result_df: pd.DataFrame, header_row: pd.Series, source_fil
 
     try:
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            # Write label header row first (reset_index so Year column appears)
+            # Row 1: column header (Year + country codes)
             label_df = pd.DataFrame([header_row], columns=HARDCODED_COUNTRY_COLUMNS)
             label_df.insert(0, YEAR_COL, '')
             label_df.to_excel(writer, sheet_name=SHEET_NAME, index=False, startrow=0)
 
-            # Write data rows below (startrow=1 to sit directly under header)
-            data_out = result_df.reset_index()  # brings Year back as column
-            data_out = data_out[[YEAR_COL] + HARDCODED_COUNTRY_COLUMNS]  # enforce order
+            # Rows 2+: year data
+            data_out = result_df.reset_index()
+            data_out = data_out[[YEAR_COL] + HARDCODED_COUNTRY_COLUMNS]
             data_out.to_excel(writer, sheet_name=SHEET_NAME, index=False,
                               startrow=1, header=False)
 
-        print(f"\nSaved: {os.path.basename(filepath)}")
+        # Apply comma number format to all numeric data cells (skip header rows)
+        wb = openpyxl.load_workbook(filepath)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=3, min_col=2):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.##'
+        wb.save(filepath)
+
+        print(f"DATA saved: {os.path.basename(filepath)}")
         return filepath
 
     except Exception as e:
-        print(f"Error saving file: {e}")
+        print(f"[ERROR] _save_data: {e}")
         return None
 
 
-def main():
-    print("SIPRI to MILEX_DATA Format Converter")
-    print("=" * 50)
+def _save_metadata(run_date: str) -> str | None:
+    """
+    Write META Excel file with one row per country timeseries.
+    Returns the saved filepath.
+    """
+    output_folder = os.path.join(os.getcwd(), OUTPUT_DIR)
+    os.makedirs(output_folder, exist_ok=True)
+    filepath = os.path.join(output_folder, f"{OUTPUT_PREFIX}_META_{run_date}.xlsx")
 
-    result = read_milex_data()
+    rows = []
+    for col in HARDCODED_COUNTRY_COLUMNS:
+        iso = col.split('.')[0]
+        name = COUNTRY_CODE_MAP.get(iso, iso)
+        rows.append({
+            "CODE":              col,
+            "DESCRIPTION":       f"Military expenditure, {name}",
+            "FREQUENCY":         "Annual",
+            "UNIT":              "USD millions (current prices)",
+            "SOURCE_NAME":       "SIPRI Military Expenditure Database",
+            "SOURCE_URL":        "https://www.sipri.org/databases/milex",
+            "DATASET":           DATASET_CODE,
+            "NEXT_RELEASE_DATE": "",
+        })
+
+    try:
+        pd.DataFrame(rows).to_excel(filepath, index=False)
+        print(f"META saved: {os.path.basename(filepath)}")
+        return filepath
+    except Exception as e:
+        print(f"[ERROR] _save_metadata: {e}")
+        return None
+
+
+def _create_zip(data_path: str, meta_path: str, run_date: str) -> str | None:
+    """
+    Package DATA and META files into {OUTPUT_PREFIX}_{YYYYMMDD}.ZIP.
+    Returns the zip filepath.
+    """
+    output_folder = os.path.join(os.getcwd(), OUTPUT_DIR)
+    zip_path = os.path.join(output_folder, f"{OUTPUT_PREFIX}_{run_date}.ZIP")
+
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            if data_path and os.path.exists(data_path):
+                zf.write(data_path, os.path.basename(data_path))
+            if meta_path and os.path.exists(meta_path):
+                zf.write(meta_path, os.path.basename(meta_path))
+        print(f"ZIP created: {os.path.basename(zip_path)}")
+        return zip_path
+    except Exception as e:
+        print(f"[ERROR] _create_zip: {e}")
+        return None
+
+
+def scrape() -> tuple:
+    """
+    Run the full mapping pipeline:
+      _load_source → _extract_data → _save_data → _save_metadata → _create_zip
+    Returns (data_path, meta_path, zip_path).
+    """
+    print(f"\n{'='*50}")
+    print(f"SIPRI Military Expenditure Mapper — {DATASET_CODE}")
+    print(f"{'='*50}")
+
+    result = _load_source()
     if not result:
-        return None, None
+        return None, None, None
 
     df, sheet_name, source_file_path = result
 
-    milex_result = create_milex_format(df)
+    milex_result = _extract_data(df)
     if milex_result is None:
-        return None, None
+        return None, None, None
 
     result_df, header_row = milex_result
-    output_file = save_milex_format(result_df, header_row, source_file_path)
+    run_date = datetime.now().strftime('%Y%m%d')
 
-    if output_file:
-        # --- Dynamic summary ---
+    data_path = _save_data(result_df, header_row, run_date)
+    meta_path = _save_metadata(run_date)
+    zip_path  = _create_zip(data_path, meta_path, run_date)
+
+    if result_df is not None:
         years = result_df.index.tolist()
         print(f"\n=== SUMMARY ===")
-        print(f"Countries: {len(result_df.columns)}")
-        print(f"Years: {min(years)}-{max(years)} ({len(years)} total)")
+        print(f"Countries : {len(result_df.columns)}")
+        print(f"Years     : {min(years)}-{max(years)} ({len(years)} total)")
 
-        # Top spenders in the most recent year that has any data
         for latest_year in reversed(years):
-            year_series = result_df.loc[latest_year]
-            ranked = (
-                year_series.dropna()
-                           .sort_values(ascending=False)
-            )
+            ranked = result_df.loc[latest_year].dropna().sort_values(ascending=False)
             if ranked.empty:
                 continue
             print(f"\n=== TOP 10 MILITARY SPENDERS IN {latest_year} ===")
             for i, (col, val) in enumerate(ranked.head(10).items(), 1):
-                iso = col.split('.')[0]
+                iso  = col.split('.')[0]
                 name = COUNTRY_CODE_MAP.get(iso, iso)
                 print(f"  {i:2d}. {name}: ${val:,.0f} million")
             break
 
-    return result_df, output_file
+    return data_path, meta_path, zip_path
+
+
+def main():
+    """Entry point. Supports --all flag (reserved for future backfill)."""
+    data_path, meta_path, zip_path = scrape()
+    if zip_path:
+        print(f"\nDone — {zip_path}")
+    else:
+        print("\n[ERROR] Mapping failed — check logs above")
 
 
 if __name__ == "__main__":
-    milex_df, output_file = main()
+    main()
